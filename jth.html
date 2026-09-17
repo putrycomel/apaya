@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>putrek</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:#050506;color:#e8e8ea;font-family:'Space Mono',monospace;overflow:hidden;}
+  #stage{position:relative;width:100vw;height:100vh;height:100dvh;background:#050506;overflow:hidden;}
+  #dotCanvas,#asciiCanvas{position:absolute;top:0;left:0;width:100%;height:100%;}
+  #asciiCanvas{display:none;}
+
+  #missingNotice{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    font-size:clamp(11px,3vw,13px);color:#ffb545;text-align:center;line-height:1.6;z-index:4;display:none;max-width:85%;}
+
+  #titleScreen{
+    position:absolute;inset:0;z-index:20;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:#050506;gap:clamp(18px,5vw,34px);
+    padding:0 5vw;
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent;
+    transition:opacity .6s ease, visibility .6s;
+  }
+  #titleScreen.hidden{opacity:0;visibility:hidden;pointer-events:none;}
+  #titleDotCanvas{width:100%;height:clamp(120px,34vw,260px);}
+  #titleArtist{font-size:clamp(10px,2.6vw,13px);letter-spacing:.25em;text-transform:uppercase;color:#83838d;text-align:center;}
+  #tapHint{
+    font-size:clamp(10px,2.6vw,12px);letter-spacing:.2em;text-transform:uppercase;color:#5c5c66;
+    text-align:center;
+    animation:tapPulse 1.8s ease-in-out infinite;
+  }
+  @keyframes tapPulse{
+    0%,100%{opacity:.4;}
+    50%{opacity:1;}
+  }
+
+  @media (max-width: 480px){
+    #titleScreen{gap:16px;}
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="dotCanvas"></canvas>
+  <canvas id="asciiCanvas"></canvas>
+  <div id="missingNotice"></div>
+
+  <video id="masterVideo" src="video.mp4" muted playsinline preload="auto" style="display:none;"></video>
+  <img id="masterPhoto" src="foto.jpg" style="display:none;">
+  <audio id="masterMusic" src="music.mp3" preload="auto" style="display:none;"></audio>
+
+  <div id="titleScreen">
+    <canvas id="titleDotCanvas"></canvas>
+    <div id="titleArtist"></div>
+    <div id="tapHint"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* =========================================================================
+   KONFIGURASI — edit semua di sini, tidak ada panel setting di tampilan.
+   ========================================================================= */
+const CONFIG = {
+  songTitle:  "dunia yang nanti\n raim laode",  // pakai \n untuk pindah baris di judul (boleh 1 atau 2 baris)
+  songArtist: "",
+
+  imagePath:  "",   // taruh file ini sejajar dengan file HTML ini
+  videoPath:  "01.mp4",   // taruh file ini sejajar dengan file HTML ini (videonya SELALU bisu, tanpa suara)
+  musicPath:  "j.mp3", // audio lagu/musik lirik yang benar-benar terdengar (ganti nama sesuai file audiomu)
+
+  fontSize:   68,           // ukuran font lirik (px) — sedang, biar baris panjang tetap muat rapi di HP
+  asciiCols:  190,          // kepadatan karakter ASCII (40 - 220), makin besar makin detail (tapi makin berat di HP lawas)
+  asciiTint:  "warm",       // "warm" (warna asli) atau "mono" (putih)
+  soundOn:    true,         // true = suara music.mp3 ikut diputar (video.mp4 selalu bisu, tidak dipengaruhi ini)
+
+  // Timeline lirik/adegan. Format tiap baris:
+  //   "MM:SS TEXT teks lirik"   -> tampilkan teks dot-matrix (kata kunci TEXT boleh ditulis atau tidak)
+  //   "MM:SS VIDEO"             -> tampilkan video.mp4 sebagai ASCII
+  //   "MM:SS PHOTO" / "FOTO"    -> tampilkan foto.jpg sebagai ASCII
+  // Tandai kata dengan simbol berikut untuk mewarnainya:
+  //   *kata*  -> merah
+  //   ~kata~  -> pink
+  //   ^kata^  -> biru muda
+  //   =kata=  -> abu-abu / monokrom
+  // Pakai tanda | untuk pindah baris dalam satu lirik, contoh:
+  //   00:00 About You|The 1975   -> tampil 2 baris seperti judul
+  // PENTING: atur waktunya (MM:SS) sendiri sesuai lagu aslimu — pastikan tiap baris
+  // punya waktu yang berbeda/meningkat, jangan disamakan, supaya tiap adegan sempat terlihat.
+  timeline: `
+00:00 kita dua hati
+00:02 yang salah
+00:04.5 bodoh pada waktu
+00:11.5 itulah kenapa
+00:13.5 jatuh cinta
+00:16 dikatakan jatuh
+00:20 karna sebagaimana
+00:22 kita jatuh
+00:24.1 kita tidak punya
+00:26.5 kuasa 
+00:28 pilih jatuh
+00:30.5 pada hati yang mana
+00:32.5 VIDEO
+00:40 kalau tidak
+00:41 bisa ku punyai
+00:44 maka ku doa kan
+00:46.3 kisah kita satu
+00:50.3 di dunia yang nanti
+00:55
+  `
+};
+/* ========================================================================= */
+
+const stage = document.getElementById('stage');
+const dotCanvas = document.getElementById('dotCanvas');
+const asciiCanvas = document.getElementById('asciiCanvas');
+const dctx = dotCanvas.getContext('2d');
+const actx = asciiCanvas.getContext('2d');
+const missingNotice = document.getElementById('missingNotice');
+const masterVideo = document.getElementById('masterVideo');
+const masterPhoto = document.getElementById('masterPhoto');
+const masterMusic = document.getElementById('masterMusic');
+const titleScreen = document.getElementById('titleScreen');
+const titleDotCanvas = document.getElementById('titleDotCanvas');
+const tctx = titleDotCanvas.getContext('2d');
+
+masterVideo.src = CONFIG.videoPath;
+masterPhoto.src = CONFIG.imagePath;
+masterMusic.src = CONFIG.musicPath;
+document.getElementById('titleArtist').textContent = CONFIG.songArtist;
+
+function resizeCanvasesOnly(){
+  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  [dotCanvas, asciiCanvas].forEach(c=>{
+    const w = stage.clientWidth, h = stage.clientHeight;
+    c.width = w*dpr; c.height = h*dpr;
+    c.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
+  });
+  const tw = titleDotCanvas.clientWidth, th = titleDotCanvas.clientHeight;
+  titleDotCanvas.width = tw*dpr; titleDotCanvas.height = th*dpr;
+  tctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+function resizeAll(){
+  resizeCanvasesOnly();
+  // layar berubah ukuran (mis. putar HP) -> susun ulang teks yang sedang tampil
+  // supaya tetap pas dan tidak kepotong.
+  if(!titleScreen.classList.contains('hidden')){
+    if(typeof renderTitle === 'function') renderTitle();
+  } else if(dotCanvas.style.display==='block' && lastRawLine){
+    if(typeof showTextScene === 'function') showTextScene(lastRawLine);
+  }
+}
+let resizeDebounce = null;
+window.addEventListener('resize', ()=>{
+  clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(resizeAll, 120);
+});
+resizeCanvasesOnly(); // ukuran awal saja (aman dipanggil sebelum konstanta di bawah didefinisikan)
+
+/* ============ ASSET AVAILABILITY ============ */
+let videoAvailable = false, photoAvailable = false, musicAvailable = false;
+masterVideo.addEventListener('loadeddata', ()=>{ videoAvailable = true; });
+masterVideo.addEventListener('error', ()=>{ videoAvailable = false; });
+masterPhoto.addEventListener('load', ()=>{ photoAvailable = true; });
+masterPhoto.addEventListener('error', ()=>{ photoAvailable = false; });
+masterMusic.addEventListener('loadeddata', ()=>{ musicAvailable = true; });
+masterMusic.addEventListener('error', ()=>{ musicAvailable = false; });
+
+/* ============ DOT MATRIX TEXT RENDERER ============ */
+const HIGHLIGHT_COLORS = {
+  '*': '#ff3b3f', // merah
+  '~': '#ff6fae', // pink
+  '^': '#7ec8ff', // biru muda
+  '=': '#b9b9c2'  // abu-abu / monokrom
+};
+// karakter pengisi huruf -- sesuai permintaan: v b + - i m a
+const GLYPH_RAMP = "bima";
+
+// Font dot-matrix 5x7 buatan sendiri (seperti papan LED klasik) supaya bentuk tiap
+// huruf DIJAMIN benar & terbaca -- bukan hasil tebak-tebakan dari font sistem.
+// '1' = kotak terisi (nanti diisi salah satu huruf v a b m i + -), '0' = kosong.
+const FONT5X7 = {
+' ':["00000","00000","00000","00000","00000","00000","00000"],
+'A':["01110","10001","10001","11111","10001","10001","10001"],
+'B':["11110","10001","10001","11110","10001","10001","11110"],
+'C':["01111","10000","10000","10000","10000","10000","01111"],
+'D':["11110","10001","10001","10001","10001","10001","11110"],
+'E':["11111","10000","10000","11110","10000","10000","11111"],
+'F':["11111","10000","10000","11110","10000","10000","10000"],
+'G':["01111","10000","10000","10011","10001","10001","01110"],
+'H':["10001","10001","10001","11111","10001","10001","10001"],
+'I':["01110","00100","00100","00100","00100","00100","01110"],
+'J':["00111","00010","00010","00010","00010","10010","01100"],
+'K':["10001","10010","10100","11000","10100","10010","10001"],
+'L':["10000","10000","10000","10000","10000","10000","11111"],
+'M':["10001","11011","10101","10101","10001","10001","10001"],
+'N':["10001","11001","10101","10101","10011","10001","10001"],
+'O':["01110","10001","10001","10001","10001","10001","01110"],
+'P':["11110","10001","10001","11110","10000","10000","10000"],
+'Q':["01110","10001","10001","10001","10101","10010","01101"],
+'R':["11110","10001","10001","11110","10100","10010","10001"],
+'S':["01111","10000","10000","01110","00001","00001","11110"],
+'T':["11111","00100","00100","00100","00100","00100","00100"],
+'U':["10001","10001","10001","10001","10001","10001","01110"],
+'V':["10001","10001","10001","10001","10001","01010","00100"],
+'W':["10001","10001","10001","10101","10101","10101","01010"],
+'X':["10001","10001","01010","00100","01010","10001","10001"],
+'Y':["10001","10001","01010","00100","00100","00100","00100"],
+'Z':["11111","00001","00010","00100","01000","10000","11111"],
+'0':["01110","10011","10101","10101","11001","10001","01110"],
+'1':["00100","01100","00100","00100","00100","00100","01110"],
+'2':["01110","10001","00001","00010","00100","01000","11111"],
+'3':["11111","00010","00100","00010","00001","10001","01110"],
+'4':["00010","00110","01010","10010","11111","00010","00010"],
+'5':["11111","10000","11110","00001","00001","10001","01110"],
+'6':["00110","01000","10000","11110","10001","10001","01110"],
+'7':["11111","00001","00010","00100","01000","01000","01000"],
+'8':["01110","10001","10001","01110","10001","10001","01110"],
+'9':["01110","10001","10001","01111","00001","00010","01100"],
+"'":["00100","00100","01000","00000","00000","00000","00000"],
+'.':["00000","00000","00000","00000","00000","01100","01100"],
+',':["00000","00000","00000","00000","00000","01100","01000"],
+'?':["01110","10001","00001","00010","00100","00000","00100"],
+'!':["00100","00100","00100","00100","00100","00000","00100"],
+'-':["00000","00000","00000","11111","00000","00000","00000"],
+':':["00000","01100","01100","00000","01100","01100","00000"]
+};
+function glyphFor(ch){ return FONT5X7[ch.toUpperCase()] || FONT5X7[' ']; }
+
+function parseHighlights(raw){
+  let clean='', ranges=[]; // ranges: [start, end, color]
+  let active = null;
+  for(let i=0;i<raw.length;i++){
+    const c = raw[i];
+    if(HIGHLIGHT_COLORS[c]){
+      if(active && active.marker===c){
+        ranges.push([active.start, clean.length, HIGHLIGHT_COLORS[c]]);
+        active = null;
+      } else if(!active){
+        active = {marker:c, start:clean.length};
+      } else {
+        clean += c; // simbol beda sedang aktif, tulis apa adanya
+      }
+      continue;
+    }
+    clean += c;
+  }
+  return {clean, ranges};
+}
+function colorAt(idx, ranges){
+  for(const [s,e,color] of ranges) if(idx>=s && idx<e) return color;
+  return null;
+}
+
+// Susun tiap baris dari pola 5x7 di atas -> hasilnya SELALU membentuk kata yang benar,
+// lalu tiap kotak "1" diisi salah satu huruf v a b m i + - untuk teksturnya.
+function buildDotField(rawLine, fontSizePx){
+  fontSizePx = fontSizePx || 90;
+  const rawLines = String(rawLine).split('\n');
+  const CELL = Math.max(6, fontSizePx/7);
+  const letterGap = CELL*0.9;
+  const spaceWidth = CELL*3.2;
+  const lineGap = CELL*2.4;
+
+  const lineData = rawLines.map(line=>parseHighlights(line));
+
+  function lineWidth(clean){
+    let w=0;
+    for(let i=0;i<clean.length;i++){
+      w += (clean[i]===' ') ? spaceWidth : 5*CELL;
+      if(i<clean.length-1) w += letterGap;
+    }
+    return w;
+  }
+  const lineWidths = lineData.map(ld=>lineWidth(ld.clean));
+  const maxLineW = Math.max(10, ...lineWidths);
+  const totalH = 7*CELL*lineData.length + lineGap*Math.max(0,lineData.length-1);
+
+  const dots=[];
+  let glyphCounter = 0;
+  let yCursor = 0;
+  lineData.forEach((ld,li)=>{
+    let xCursor = (maxLineW - lineWidths[li])/2;
+    for(let ci=0; ci<ld.clean.length; ci++){
+      const ch = ld.clean[ci];
+      if(ch===' '){ xCursor += spaceWidth; continue; }
+      const color = colorAt(ci, ld.ranges);
+      const pattern = glyphFor(ch);
+      for(let r=0;r<7;r++){
+        const row = pattern[r];
+        for(let c=0;c<5;c++){
+          if(row[c]==='1'){
+            const px = xCursor + c*CELL + CELL/2;
+            const py = yCursor + r*CELL + CELL/2;
+            const glyphCh = GLYPH_RAMP[(glyphCounter++)%GLYPH_RAMP.length];
+            dots.push({x:px, y:py, color: color || '#eef0f3', ch: glyphCh});
+          }
+        }
+      }
+      xCursor += 5*CELL + letterGap;
+    }
+    yCursor += 7*CELL + lineGap;
+  });
+
+  return {dots, w:maxLineW, h:totalH, spacing:CELL};
+}
+
+// Pilih ukuran font agar teks pas dengan lebar & tinggi layar (penting untuk HP,
+// dan untuk teks 2 baris supaya tidak kepotong atas/bawah). Diusahakan tetap sebesar
+// mungkin (ukuran "sedang", tidak kekecilan) selama masih muat di layar.
+function fitField(rawLine, desiredFontSize, canvasEl){
+  const maxW = Math.max(60, canvasEl.clientWidth * 0.96);
+  const maxH = Math.max(40, canvasEl.clientHeight * 0.96);
+  let field = buildDotField(rawLine, desiredFontSize);
+  const scaleFactor = Math.min(1, maxW/field.w, maxH/field.h);
+  if(scaleFactor < 1){
+    const fontSizePx = Math.max(14, Math.floor(desiredFontSize * scaleFactor));
+    field = buildDotField(rawLine, fontSizePx);
+  }
+  return field;
+}
+
+// Tiap kotak "1" pada pola huruf diisi 1 karakter (v a b m i + -), pas mengisi kotaknya,
+// nempel rapat ke tetangganya -- bentuk hurufnya dijamin benar karena polanya sudah pasti (bitmap font).
+function drawDotField(ctx, canvasEl, field, animStart){
+  const W = canvasEl.clientWidth, H = canvasEl.clientHeight;
+  ctx.clearRect(0,0,W,H);
+  const ox = (W-field.w)/2, oy = (H-field.h)/2;
+  const elapsed = performance.now() - animStart;
+  const glyphPx = Math.max(10, field.spacing*1.28);
+  ctx.font = `700 ${glyphPx}px 'JetBrains Mono', monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  field.dots.forEach((d)=>{
+    // kedip cepat & serentak (bukan muncul bertahap dari kiri ke kanan)
+    const t = Math.max(0, Math.min(1, elapsed/90));
+    if(t<=0) return;
+    ctx.globalAlpha = t;
+    ctx.fillStyle = d.color;
+    ctx.fillText(d.ch, ox+d.x, oy+d.y);
+  });
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+let currentDots = {dots:[], w:0, h:0, spacing:1};
+let dotAnimStart = 0;
+let dotRAF = null;
+let lastRawLine = '';
+function loopDot(){
+  drawDotField(dctx, dotCanvas, currentDots, dotAnimStart);
+  if(performance.now()-dotAnimStart < 150){
+    dotRAF = requestAnimationFrame(loopDot);
+  } else {
+    dotRAF = null; // sudah selesai muncul semua -> berhenti, hemat baterai/performa
+  }
+}
+
+function showTextScene(rawLine){
+  lastRawLine = rawLine;
+  const multiline = rawLine.replace(/\|/g, '\n'); // "|" = tanda pindah baris manual
+  currentDots = fitField(multiline, CONFIG.fontSize, dotCanvas);
+  dotAnimStart = performance.now();
+  dotCanvas.style.display='block';
+  asciiCanvas.style.display='none';
+  missingNotice.style.display='none';
+  if(dotRAF) cancelAnimationFrame(dotRAF);
+  loopDot();
+}
+
+let titleDots = {dots:[], w:0, h:0, spacing:1};
+let titleAnimStart = 0;
+let titleRAF = null;
+function loopTitle(){
+  drawDotField(tctx, titleDotCanvas, titleDots, titleAnimStart);
+  if(performance.now()-titleAnimStart < 150){
+    titleRAF = requestAnimationFrame(loopTitle);
+  } else {
+    titleRAF = null;
+  }
+}
+function renderTitle(){
+  titleDots = fitField(CONFIG.songTitle, 76, titleDotCanvas, {family:"'Space Mono', monospace", weight:700});
+  titleAnimStart = performance.now();
+  if(titleRAF) cancelAnimationFrame(titleRAF);
+  loopTitle();
+}
+
+/* ============ ASCII IMAGE / VIDEO ENGINE ============ */
+const RAMP = " .'`,:;-~+=xX#%@";
+const hiddenCanvas = document.createElement('canvas');
+const hctx = hiddenCanvas.getContext('2d', {willReadFrequently:true});
+let asciiRAF = null;
+let asciiSourceEl = null;
+let scanRow = 0;
+
+function effectiveAsciiCols(){
+  const w = window.innerWidth;
+  if(w < 480) return Math.max(40, Math.round(CONFIG.asciiCols*0.55));
+  if(w < 800) return Math.max(60, Math.round(CONFIG.asciiCols*0.75));
+  return CONFIG.asciiCols;
+}
+
+// Menaikkan kecerahan warna asli foto/video, khususnya bagian gelap (mis. wajah yang
+// kurang kena cahaya) supaya lebih terlihat jelas, tanpa membuat bagian terang jadi putih polos.
+// Dipakai gamma (mengangkat bagian gelap lebih banyak daripada bagian terang) + sedikit boost linear.
+const GAMMA = 1.7;             // >1 = bagian gelap/wajah lebih terangkat. Naikkan lagi (mis 2.0) kalau masih kurang.
+const BRIGHTNESS_BOOST = 1.15; // boost linear tambahan di atas gamma.
+function brightenChannel(v){
+  const g = Math.pow(v/255, 1/GAMMA) * 255; // angkat area gelap
+  return Math.max(0, Math.min(255, Math.round(g * BRIGHTNESS_BOOST)));
+}
+function brightenLum(lumFrac){ // lumFrac 0..1, dipakai untuk pilih karakter & versi mono
+  return Math.max(0, Math.min(1, Math.pow(lumFrac, 1/GAMMA)));
+}
+
+function drawAsciiFrame(){
+  if(!asciiSourceEl){ asciiRAF = requestAnimationFrame(drawAsciiFrame); return; }
+  const cols = effectiveAsciiCols();
+  const srcW = asciiSourceEl.videoWidth || asciiSourceEl.naturalWidth || 0;
+  const srcH = asciiSourceEl.videoHeight || asciiSourceEl.naturalHeight || 0;
+  if(!srcW || !srcH){ asciiRAF = requestAnimationFrame(drawAsciiFrame); return; }
+
+  const rows = Math.max(10, Math.round((srcH/srcW)*cols*0.55));
+  hiddenCanvas.width = cols; hiddenCanvas.height = rows;
+  hctx.drawImage(asciiSourceEl, 0, 0, cols, rows);
+  const data = hctx.getImageData(0,0,cols,rows).data;
+
+  // luminance & warna dipakai dari frame foto/video (kontrasnya apa adanya, tapi
+  // kecerahan warnanya dinaikkan sedikit lewat BRIGHTNESS_BOOST)
+  const lums = new Float32Array(cols*rows);
+  for(let y=0;y<rows;y++){
+    for(let x=0;x<cols;x++){
+      const idx=(y*cols+x)*4;
+      lums[y*cols+x] = 0.299*data[idx]+0.587*data[idx+1]+0.114*data[idx+2];
+    }
+  }
+  const W = asciiCanvas.clientWidth, H = asciiCanvas.clientHeight;
+  actx.clearRect(0,0,W,H);
+  const cellW = W/cols, cellH = H/rows;
+  // font pas mengisi satu sel penuh (sedikit lebih besar dari sel supaya tidak ada celah antar karakter)
+  const fontPx = Math.max(7, Math.min(cellW*1.75, cellH*1.35));
+  actx.font = `${fontPx}px 'JetBrains Mono', monospace`;
+  actx.textAlign = 'center';
+  actx.textBaseline = 'middle';
+
+  // langsung tampil penuh, tanpa animasi scan bertahap
+  for(let y=0;y<rows;y++){
+    for(let x=0;x<cols;x++){
+      const idx=(y*cols+x)*4;
+      const rC=data[idx], gC=data[idx+1], bC=data[idx+2];
+      const rawLum = Math.min(1, Math.max(0, lums[y*cols+x]/255));
+      const lum = brightenLum(rawLum); // dicerahkan (gamma) supaya area gelap seperti wajah lebih kelihatan
+      const ch = RAMP[Math.floor(lum*(RAMP.length-1))];
+      if(ch===' ') continue;
+      // "warm" = warna asli dari foto/video, dicerahkan; "mono" = abu-abu/putih polos, dicerahkan
+      actx.fillStyle = CONFIG.asciiTint==='warm'
+        ? `rgb(${brightenChannel(rC)},${brightenChannel(gC)},${brightenChannel(bC)})`
+        : (()=>{const g=Math.round(lum*255);return `rgb(${g},${g},${g})`;})();
+      actx.globalAlpha = 0.8 + lum*0.2;
+      actx.fillText(ch, x*cellW + cellW/2, y*cellH + cellH/2);
+    }
+  }
+  actx.globalAlpha = 1;
+  asciiRAF = requestAnimationFrame(drawAsciiFrame);
+}
+
+function showVideoScene(){
+  dotCanvas.style.display='none';
+  if(!videoAvailable){
+    asciiCanvas.style.display='none';
+    missingNotice.style.display='block';
+    missingNotice.textContent = CONFIG.videoPath + ' tidak ditemukan di folder ini.';
+    return;
+  }
+  missingNotice.style.display='none';
+  asciiCanvas.style.display='block';
+  asciiSourceEl = masterVideo;
+  scanRow = 0;
+  // Pastikan videonya BENERAN jalan tiap kali adegan ini muncul (jangan cuma andalkan
+  // video yang sudah main dari awal timeline -- kalau videonya pendek, dia bisa sudah
+  // habis & berhenti sebelum adegan VIDEO ini ditampilkan).
+  if(masterVideo.paused || masterVideo.ended){
+    masterVideo.currentTime = 0;
+    masterVideo.play().catch(()=>{});
+  }
+  if(!asciiRAF) drawAsciiFrame();
+}
+function showPhotoScene(){
+  dotCanvas.style.display='none';
+  if(!photoAvailable){
+    asciiCanvas.style.display='none';
+    missingNotice.style.display='block';
+    missingNotice.textContent = CONFIG.imagePath + ' tidak ditemukan di folder ini.';
+    return;
+  }
+  missingNotice.style.display='none';
+  asciiCanvas.style.display='block';
+  asciiSourceEl = masterPhoto;
+  scanRow = 0;
+  if(!asciiRAF) drawAsciiFrame();
+}
+
+/* ============ TIMELINE PARSER ============ */
+// Toleran: kata kunci TEXT/VIDEO/PHOTO (atau alias FOTO) boleh ditulis atau tidak.
+// Kalau tidak ada kata kunci di awal, baris otomatis dianggap TEXT dengan isi apa adanya.
+function parseTimeline(raw){
+  const lines = raw.split('\n').map(s=>s.trim()).filter(Boolean);
+  const events = [];
+  for(const ln of lines){
+    const m = ln.match(/^(\d{1,3}):(\d{2}(?:\.\d+)?)\s+(.*)$/);
+    if(!m) continue;
+    const t = parseInt(m[1],10)*60 + parseFloat(m[2]);
+    const rest = m[3].trim();
+    const kw = rest.match(/^(TEXT|VIDEO|PHOTO|FOTO)\b\s*(.*)$/i);
+    let type = 'TEXT', text = rest;
+    if(kw){
+      type = kw[1].toUpperCase();
+      if(type==='FOTO') type='PHOTO';
+      text = kw[2] || '';
+    }
+    events.push({t, type, text});
+  }
+  events.sort((a,b)=>a.t-b.t);
+  // kalau ada beberapa baris di detik yang sama persis, geser sedikit
+  // supaya tidak langsung saling menimpa (video/foto sempat kelihatan).
+  for(let i=1;i<events.length;i++){
+    if(events[i].t <= events[i-1].t){
+      events[i].t = events[i-1].t + 0.05;
+    }
+  }
+  return events;
+}
+function activeEventIndex(events, time){
+  let idx=-1;
+  for(let i=0;i<events.length;i++){ if(events[i].t<=time) idx=i; else break; }
+  return idx;
+}
+
+/* ============ MASTER CLOCK / PLAYBACK ============ */
+const timelineEvents = parseTimeline(CONFIG.timeline);
+let lastEventIdx = -1;
+let playing = false;
+let internalStart = 0;
+let internalRAF = null;
+
+function applyEvent(ev){
+  if(!ev) return;
+  if(ev.type==='TEXT') showTextScene(ev.text);
+  else if(ev.type==='VIDEO') showVideoScene();
+  else if(ev.type==='PHOTO') showPhotoScene();
+}
+function tickClock(){
+  if(!playing) return;
+  // Jam utama = music.mp3 (kalau ada), atau jam internal kalau tidak ada audio.
+  let now = (musicAvailable && !masterMusic.paused) ? masterMusic.currentTime : (performance.now()-internalStart)/1000;
+  const idx = activeEventIndex(timelineEvents, now);
+  if(idx !== lastEventIdx && idx>=0){ lastEventIdx = idx; applyEvent(timelineEvents[idx]); }
+  const lastT = timelineEvents.length ? timelineEvents[timelineEvents.length-1].t + 4 : 0;
+  if(now >= lastT && lastT>0){ finishPlayback(); return; }
+  internalRAF = requestAnimationFrame(tickClock);
+}
+// Selesai sekali jalan -> berhenti (TIDAK diulang otomatis), lalu balik ke layar judul.
+function finishPlayback(){
+  playing = false;
+  if(internalRAF) cancelAnimationFrame(internalRAF);
+  if(videoAvailable) masterVideo.pause();
+  if(musicAvailable) masterMusic.pause();
+  setTimeout(()=>{
+    dotCanvas.style.display='none';
+    asciiCanvas.style.display='none';
+    missingNotice.style.display='none';
+    renderTitle();
+    titleScreen.classList.remove('hidden');
+  }, 1200);
+}
+function startPlayback(){
+  if(timelineEvents.length===0){ alert('Timeline kosong atau formatnya salah di CONFIG.timeline.'); return; }
+  playing = true;
+  // video.mp4 SELALU bisu (bukan sumber suara). Tidak diputar dari sekarang -- baru
+  // benar-benar mulai jalan saat adegan VIDEO di timeline muncul (lihat showVideoScene).
+  masterVideo.currentTime = 0;
+  masterVideo.muted = true;
+  masterVideo.pause();
+  // music.mp3 = satu-satunya sumber suara, dan jadi acuan waktu utama kalau tersedia
+  masterMusic.currentTime = 0;
+  masterMusic.muted = !CONFIG.soundOn;
+  if(musicAvailable) masterMusic.play().catch(()=>{});
+  internalStart = performance.now();
+  lastEventIdx = -1;
+  internalRAF = requestAnimationFrame(tickClock);
+}
+
+titleScreen.addEventListener('click', ()=>{
+  if(titleScreen.classList.contains('hidden')) return;
+  titleScreen.classList.add('hidden');
+  startPlayback();
+});
+
+/* ============ INIT ============ */
+window.addEventListener('load', ()=>{ setTimeout(renderTitle, 250); });
+
+})();
+</script>
+</body>
+</html>
