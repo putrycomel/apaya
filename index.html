@@ -100,9 +100,9 @@ const CONFIG = {
 00:04.5 bodoh pada waktu
 00:11.5 itulah kenapa
 00:13.5 jatuh cinta
-00:16 dikatakan jatuh
+00:15.8 dikatakan jatuh
 00:20 karna sebagaimana
-00:22 kita jatuh
+00:21.5 kita jatuh
 00:24.1 kita tidak punya
 00:26.5 kuasa 
 00:28 pilih jatuh
@@ -413,7 +413,7 @@ function effectiveAsciiCols(){
 // Menaikkan kecerahan warna asli foto/video, khususnya bagian gelap (mis. wajah yang
 // kurang kena cahaya) supaya lebih terlihat jelas, tanpa membuat bagian terang jadi putih polos.
 // Dipakai gamma (mengangkat bagian gelap lebih banyak daripada bagian terang) + sedikit boost linear.
-const GAMMA = 1.7;             // >1 = bagian gelap/wajah lebih terangkat. Naikkan lagi (mis 2.0) kalau masih kurang.
+const GAMMA = 1.9;             // >1 = bagian gelap/wajah lebih terangkat. Naikkan lagi (mis 2.0) kalau masih kurang.
 const BRIGHTNESS_BOOST = 1.15; // boost linear tambahan di atas gamma.
 function brightenChannel(v){
   const g = Math.pow(v/255, 1/GAMMA) * 255; // angkat area gelap
