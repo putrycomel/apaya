@@ -73,7 +73,7 @@ const CONFIG = {
   songArtist: "",
 
   imagePath:  "",   // taruh file ini sejajar dengan file HTML ini
-  videoPath:  "01.mp4",   // taruh file ini sejajar dengan file HTML ini (videonya SELALU bisu, tanpa suara)
+  videoPath:  "12.mp4",   // taruh file ini sejajar dengan file HTML ini (videonya SELALU bisu, tanpa suara)
   musicPath:  "j.mp3", // audio lagu/musik lirik yang benar-benar terdengar (ganti nama sesuai file audiomu)
 
   fontSize:   68,           // ukuran font lirik (px) — sedang, biar baris panjang tetap muat rapi di HP
@@ -100,7 +100,7 @@ const CONFIG = {
 00:04.5 bodoh pada waktu
 00:11.5 itulah kenapa
 00:13.5 jatuh cinta
-00:16.1 dikatakan jatuh
+00:16.0 dikatakan jatuh
 00:20 karna sebagaimana
 00:21.5 kita jatuh
 00:24.1 kita tidak punya
@@ -399,21 +399,60 @@ function renderTitle(){
 const RAMP = " .'`,:;-~+=xX#%@";
 const hiddenCanvas = document.createElement('canvas');
 const hctx = hiddenCanvas.getContext('2d', {willReadFrequently:true});
-let asciiRAF = null;
-let asciiSourceEl = null;
-let scanRow = 0;
 
-function effectiveAsciiCols(){
-  const w = window.innerWidth;
-  if(w < 480) return Math.max(40, Math.round(CONFIG.asciiCols*0.55));
-  if(w < 800) return Math.max(60, Math.round(CONFIG.asciiCols*0.75));
+// Buffer render ASCII terpisah, UKURAN TETAP & KECIL (sengaja TIDAK dikali
+// devicePixelRatio seperti canvas layar utama). Ini kunci performanya: menggambar
+// ratusan/ribuan karakter teks itu mahal, dan kalau dilakukan di resolusi setinggi
+// layar HP (bisa 2x lipat di HP retina) SETIAP frame, itu berat -> main thread jadi
+// sibuk -> loop pengecek waktu lirik ikut telat -> lirik kelihatan telat/ngelag,
+// terutama tepat setelah bagian VIDEO. Sekarang teksnya digambar sekali di buffer
+// kecil ini, lalu tinggal "ditempel" (drawImage, operasi murah) ke layar sebenarnya.
+const CHAR_W = 9, CHAR_H = 15;
+const asciiBuf = document.createElement('canvas');
+const bctx = asciiBuf.getContext('2d');
+
+let asciiSourceEl = null;
+let videoFrameHandle = null;
+const videoFrameCbSupported = (typeof HTMLVideoElement !== 'undefined') && ('requestVideoFrameCallback' in HTMLVideoElement.prototype);
+
+// KUALITAS OTOMATIS KHUSUS VIDEO: kalau render tiap frame kelihatan berat/lambat,
+// kepadatan karakternya otomatis diturunkan sedikit demi sedikit sampai mulus, dan
+// dinaikkan lagi kalau ternyata masih ada sisa performa. Foto tidak perlu ini karena
+// cuma digambar sekali (statis).
+let videoQuality = 0.9;         // mulai dari kepadatan tinggi (render sudah ringan berkat buffer), tetap ada jaring pengaman otomatis
+const VIDEO_QUALITY_MIN = 0.55; // batas bawah dinaikkan supaya wajah tidak jadi terlalu kasar walau lagi disesuaikan
+const VIDEO_QUALITY_MAX = 1;
+const TARGET_FRAME_MS = 24;     // sedikit lebih longgar, karena render sekarang jauh lebih murah dari sebelumnya
+let frameDurations = [];
+const QUALITY_SAMPLE_SIZE = 6;
+
+// PENTING: untuk VIDEO, kepadatan TIDAK lagi dipotong berdasarkan lebar layar (w<480 dst).
+// Potongan itu peninggalan versi lama waktu render-nya masih berat & ikut skala layar HP.
+// Sekarang buffer render sudah berukuran tetap (tidak ikut skala device), jadi biarkan
+// videoQuality (otomatis) yang menentukan -- bukan dipotong dobel oleh lebar layar, karena
+// itu yang bikin wajah kelihatan buram di HP walau videoQuality sudah dinaikkan.
+function effectiveAsciiCols(forVideo){
+  if(forVideo) return Math.max(50, Math.round(CONFIG.asciiCols*videoQuality));
+  // untuk foto (statis, cuma digambar sekali) tetap pakai kepadatan penuh apa adanya
   return CONFIG.asciiCols;
+}
+
+function adjustVideoQuality(durationMs){
+  frameDurations.push(durationMs);
+  if(frameDurations.length < QUALITY_SAMPLE_SIZE) return;
+  const avg = frameDurations.reduce((a,b)=>a+b,0)/frameDurations.length;
+  frameDurations = [];
+  if(avg > TARGET_FRAME_MS*1.25){
+    videoQuality = Math.max(VIDEO_QUALITY_MIN, videoQuality - 0.1);
+  } else if(avg < TARGET_FRAME_MS*0.5 && videoQuality < VIDEO_QUALITY_MAX){
+    videoQuality = Math.min(VIDEO_QUALITY_MAX, videoQuality + 0.08);
+  }
 }
 
 // Menaikkan kecerahan warna asli foto/video, khususnya bagian gelap (mis. wajah yang
 // kurang kena cahaya) supaya lebih terlihat jelas, tanpa membuat bagian terang jadi putih polos.
 // Dipakai gamma (mengangkat bagian gelap lebih banyak daripada bagian terang) + sedikit boost linear.
-const GAMMA = 1.9;             // >1 = bagian gelap/wajah lebih terangkat. Naikkan lagi (mis 2.0) kalau masih kurang.
+const GAMMA = 2.5;             // >1 = bagian gelap/wajah lebih terangkat. Naikkan lagi (mis 2.0) kalau masih kurang.
 const BRIGHTNESS_BOOST = 1.15; // boost linear tambahan di atas gamma.
 function brightenChannel(v){
   const g = Math.pow(v/255, 1/GAMMA) * 255; // angkat area gelap
@@ -423,59 +462,111 @@ function brightenLum(lumFrac){ // lumFrac 0..1, dipakai untuk pilih karakter & v
   return Math.max(0, Math.min(1, Math.pow(lumFrac, 1/GAMMA)));
 }
 
-function drawAsciiFrame(){
-  if(!asciiSourceEl){ asciiRAF = requestAnimationFrame(drawAsciiFrame); return; }
-  const cols = effectiveAsciiCols();
+// Baca 1 frame dari video/foto -> render jadi teks ASCII ke buffer kecil (asciiBuf).
+// Return false kalau sumbernya belum siap (video belum ada dimensi, dsb).
+function renderAsciiToBuffer(){
+  const isVideo = (asciiSourceEl===masterVideo);
+  const cols = effectiveAsciiCols(isVideo);
   const srcW = asciiSourceEl.videoWidth || asciiSourceEl.naturalWidth || 0;
   const srcH = asciiSourceEl.videoHeight || asciiSourceEl.naturalHeight || 0;
-  if(!srcW || !srcH){ asciiRAF = requestAnimationFrame(drawAsciiFrame); return; }
+  if(!srcW || !srcH) return false;
 
   const rows = Math.max(10, Math.round((srcH/srcW)*cols*0.55));
   hiddenCanvas.width = cols; hiddenCanvas.height = rows;
   hctx.drawImage(asciiSourceEl, 0, 0, cols, rows);
   const data = hctx.getImageData(0,0,cols,rows).data;
+  const n = cols*rows;
 
-  // luminance & warna dipakai dari frame foto/video (kontrasnya apa adanya, tapi
-  // kecerahan warnanya dinaikkan sedikit lewat BRIGHTNESS_BOOST)
-  const lums = new Float32Array(cols*rows);
-  for(let y=0;y<rows;y++){
-    for(let x=0;x<cols;x++){
-      const idx=(y*cols+x)*4;
-      lums[y*cols+x] = 0.299*data[idx]+0.587*data[idx+1]+0.114*data[idx+2];
-    }
+  // TAHAP 1: hitung luminance mentah tiap pixel + cari titik paling gelap & paling
+  // terang di frame ini. Rentang gelap-terang wajah biasanya sempit (mis. cuma
+  // 90-180 dari skala 0-255), jadi kalau dipakai apa adanya, cuma sebagian kecil
+  // karakter RAMP yang kepakai -> detail kayak mata/alis jadi menyatu/kurang tegas.
+  const rawLums = new Float32Array(n);
+  let minL = 255, maxL = 0;
+  for(let i=0;i<n;i++){
+    const idx = i*4;
+    const l = 0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2];
+    rawLums[i] = l;
+    if(l < minL) minL = l;
+    if(l > maxL) maxL = l;
   }
-  const W = asciiCanvas.clientWidth, H = asciiCanvas.clientHeight;
-  actx.clearRect(0,0,W,H);
-  const cellW = W/cols, cellH = H/rows;
-  // font pas mengisi satu sel penuh (sedikit lebih besar dari sel supaya tidak ada celah antar karakter)
-  const fontPx = Math.max(7, Math.min(cellW*1.75, cellH*1.35));
-  actx.font = `${fontPx}px 'JetBrains Mono', monospace`;
-  actx.textAlign = 'center';
-  actx.textBaseline = 'middle';
+  const contrastRange = Math.max(1, maxL - minL); // hindari bagi nol kalau frame polos rata
 
-  // langsung tampil penuh, tanpa animasi scan bertahap
+  const bufW = cols*CHAR_W, bufH = rows*CHAR_H;
+  if(asciiBuf.width!==bufW || asciiBuf.height!==bufH){
+    asciiBuf.width = bufW; asciiBuf.height = bufH;
+  }
+  bctx.clearRect(0,0,bufW,bufH);
+  const fontPx = Math.max(7, Math.min(CHAR_W*1.75, CHAR_H*1.35));
+  bctx.font = `${fontPx}px 'JetBrains Mono', monospace`;
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+
+  // TAHAP 2: gambar tiap karakter, tapi luminance-nya sudah "diregangkan" (contrast
+  // stretch) memakai minL/maxL di atas -> titik paling gelap di frame jadi gelap
+  // penuh, paling terang jadi terang penuh, baru digamma untuk angkat area gelap.
   for(let y=0;y<rows;y++){
     for(let x=0;x<cols;x++){
-      const idx=(y*cols+x)*4;
+      const i = y*cols+x;
+      const idx = i*4;
       const rC=data[idx], gC=data[idx+1], bC=data[idx+2];
-      const rawLum = Math.min(1, Math.max(0, lums[y*cols+x]/255));
-      const lum = brightenLum(rawLum); // dicerahkan (gamma) supaya area gelap seperti wajah lebih kelihatan
+      const stretched = (rawLums[i]-minL)/contrastRange; // 0..1, kontras penuh
+      const lum = brightenLum(stretched); // dicerahkan (gamma) supaya area gelap seperti wajah lebih kelihatan
       const ch = RAMP[Math.floor(lum*(RAMP.length-1))];
       if(ch===' ') continue;
       // "warm" = warna asli dari foto/video, dicerahkan; "mono" = abu-abu/putih polos, dicerahkan
-      actx.fillStyle = CONFIG.asciiTint==='warm'
+      bctx.fillStyle = CONFIG.asciiTint==='warm'
         ? `rgb(${brightenChannel(rC)},${brightenChannel(gC)},${brightenChannel(bC)})`
         : (()=>{const g=Math.round(lum*255);return `rgb(${g},${g},${g})`;})();
-      actx.globalAlpha = 0.8 + lum*0.2;
-      actx.fillText(ch, x*cellW + cellW/2, y*cellH + cellH/2);
+      bctx.globalAlpha = 0.8 + lum*0.2;
+      bctx.fillText(ch, x*CHAR_W + CHAR_W/2, y*CHAR_H + CHAR_H/2);
     }
   }
-  actx.globalAlpha = 1;
-  asciiRAF = requestAnimationFrame(drawAsciiFrame);
+  bctx.globalAlpha = 1;
+  return true;
+}
+
+// Tempel buffer kecil itu ke canvas layar sebenarnya (murah -> tidak bikin patah-patah
+// dan tidak menyita jatah waktu loop pengecek lirik).
+function blitBufferToScreen(){
+  const W = asciiCanvas.clientWidth, H = asciiCanvas.clientHeight;
+  actx.clearRect(0,0,W,H);
+  actx.drawImage(asciiBuf, 0, 0, asciiBuf.width, asciiBuf.height, 0, 0, W, H);
+}
+
+function renderAsciiFrame(){
+  if(!asciiSourceEl) return;
+  if(renderAsciiToBuffer()) blitBufferToScreen();
+}
+
+// Untuk VIDEO: render persis saat ada frame video baru (requestVideoFrameCallback),
+// jadi tidak menggambar ulang frame yang sama & kecepatannya otomatis ikut fps asli
+// videonya. Fallback ke requestAnimationFrame kalau browser tidak dukung API itu.
+function videoFrameLoop(){
+  if(asciiSourceEl !== masterVideo) return; // adegan sudah pindah, hentikan
+  const t0 = performance.now();
+  renderAsciiFrame();
+  adjustVideoQuality(performance.now() - t0);
+  if(videoFrameCbSupported){
+    videoFrameHandle = masterVideo.requestVideoFrameCallback(videoFrameLoop);
+  } else {
+    videoFrameHandle = requestAnimationFrame(videoFrameLoop);
+  }
+}
+function stopAsciiLoop(){
+  if(videoFrameHandle!=null){
+    if(videoFrameCbSupported && masterVideo.cancelVideoFrameCallback){
+      try{ masterVideo.cancelVideoFrameCallback(videoFrameHandle); }catch(e){}
+    } else {
+      cancelAnimationFrame(videoFrameHandle);
+    }
+    videoFrameHandle = null;
+  }
 }
 
 function showVideoScene(){
   dotCanvas.style.display='none';
+  stopAsciiLoop();
   if(!videoAvailable){
     asciiCanvas.style.display='none';
     missingNotice.style.display='block';
@@ -485,7 +576,8 @@ function showVideoScene(){
   missingNotice.style.display='none';
   asciiCanvas.style.display='block';
   asciiSourceEl = masterVideo;
-  scanRow = 0;
+  videoQuality = 0.9;      // mulai lagi dari kepadatan tinggi tiap adegan video baru
+  frameDurations = [];
   // Pastikan videonya BENERAN jalan tiap kali adegan ini muncul (jangan cuma andalkan
   // video yang sudah main dari awal timeline -- kalau videonya pendek, dia bisa sudah
   // habis & berhenti sebelum adegan VIDEO ini ditampilkan).
@@ -493,10 +585,11 @@ function showVideoScene(){
     masterVideo.currentTime = 0;
     masterVideo.play().catch(()=>{});
   }
-  if(!asciiRAF) drawAsciiFrame();
+  videoFrameLoop();
 }
 function showPhotoScene(){
   dotCanvas.style.display='none';
+  stopAsciiLoop();
   if(!photoAvailable){
     asciiCanvas.style.display='none';
     missingNotice.style.display='block';
@@ -506,8 +599,7 @@ function showPhotoScene(){
   missingNotice.style.display='none';
   asciiCanvas.style.display='block';
   asciiSourceEl = masterPhoto;
-  scanRow = 0;
-  if(!asciiRAF) drawAsciiFrame();
+  renderAsciiFrame(); // foto statis -> cukup digambar sekali, tidak perlu loop terus (hemat performa)
 }
 
 /* ============ TIMELINE PARSER ============ */
@@ -573,6 +665,7 @@ function tickClock(){
 function finishPlayback(){
   playing = false;
   if(internalRAF) cancelAnimationFrame(internalRAF);
+  stopAsciiLoop();
   if(videoAvailable) masterVideo.pause();
   if(musicAvailable) masterMusic.pause();
   setTimeout(()=>{
